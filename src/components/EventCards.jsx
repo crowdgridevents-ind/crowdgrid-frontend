@@ -6,6 +6,7 @@ import { canBook, useAuth } from '../lib/auth';
 import { cachePass } from '../lib/passCache';
 import { rupees, useCart } from '../lib/cart';
 import { categoryLabel, fmtDate, fmtDateTime, fmtTime } from '../lib/format';
+import { inPrebooking } from '../lib/prebook';
 import EventCategoryIcon from './EventCategoryIcon';
 import Notice from './Notice';
 
@@ -101,7 +102,12 @@ function PublicEventCard({ event, onRegister, showRegister, large = false }) {
           <Link to={`/event/${event.slug}`} className="btn-ghost min-h-11 px-3 text-sm">
             Details
           </Link>
-          {showRegister && (
+          {showRegister && event.ticketPrice > 0 && inPrebooking(event) ? (
+            // Before booking opens: pre-book on the event page (25% now)
+            <Link to={`/event/${event.slug}`} className="btn-primary min-h-11 px-4 text-sm">
+              Pre-book
+            </Link>
+          ) : showRegister && (
             <button
               type="button"
               className="btn-primary min-h-11 px-4 text-sm"

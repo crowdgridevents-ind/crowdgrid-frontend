@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import API, { errorMessage } from '../lib/api';
+import { rupees, useCart } from '../lib/cart';
+import { addBalanceToCart } from '../lib/prebook';
+
+const PREBOOK_STATUS = { HELD: 'Pre-booked', CONFIRMED: 'Confirmed', LAPSED: 'Lapsed' };
 import { loadPasses, savePasses } from '../lib/passCache';
 import { fmtDateTime } from '../lib/format';
 import Notice, { Loading } from '../components/Notice';
@@ -27,7 +31,19 @@ export default function Passbook() {
   const { user } = useAuth();
   const [cancelling, setCancelling] = useState(null); // pass shown in the cancel pop-up
   const [done, setDone] = useState('');
+  const [prebookings, setPrebookings] = useState([]);
   const celebrate = useCelebrate();
+  const cart = useCart();
+  const navigate = useNavigate();
+
+  // Pre-booked event tickets (25% paid); needs the network, so it simply stays hidden offline
+  useEffect(() => {
+    API.get('/events/prebookings/mine').then(({ data }) => setPrebookings(Array.isArray(data) ? data : [])).catch(() => {});
+  }, []);
+  const payRest = (p) => {
+    addBalanceToCart(cart, p);
+    navigate('/checkout');
+  };
 
   const load = () =>
     API.get('/passes/mine')
@@ -67,6 +83,36 @@ export default function Passbook() {
       {user && <MyQrCard name={user.name} photoUrl={user.photoUrl} activeCount={withState.filter((p) => p.state === 'ACTIVE').length} />}
       {done && <Notice tone="success">{done}</Notice>}
       {offlineSince && <Notice>Showing passes saved on {fmtDateTime(offlineSince)}. You're offline, but these QR codes still work at the gate.</Notice>}
+
+      {prebookings.length > 0 && (
+        <section aria-labelledby="prebook-head" data-testid="prebookings">
+          <h2 id="prebook-head" className="text-xl font-bold">Pre-bookings</h2>
+          <p className="text-sm text-ink-soft">25% paid. Pay the rest within 48 hours of booking opening to get your entry pass.</p>
+          <ul className="mt-3 grid gap-4 md:grid-cols-2">
+            {prebookings.map((p) => (
+              <li key={p._id} className="panel space-y-2 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <p className="font-bold">{p.event?.slug ? <Link to={`/event/${p.event.slug}`} className="underline">{p.event.title}</Link> : p.event?.title || 'Event'}</p>
+                  <span className={p.status === 'CONFIRMED' ? 'pill-ok' : p.status === 'LAPSED' ? 'pill-out' : 'pill-low'}>{PREBOOK_STATUS[p.status]}</span>
+                </div>
+                <p className="text-sm text-ink-soft">
+                  {p.people} {p.people === 1 ? 'ticket' : 'tickets'} · {rupees(p.deposit)} paid of {rupees(p.total)}
+                  {p.event?.startDate && <> · event on {fmtDateTime(p.event.startDate)}</>}
+                </p>
+                {p.status === 'HELD' && p.canPayBalance && (
+                  <>
+                    <p className="text-sm">Pay by <b>{fmtDateTime(p.balanceDueAt)}</b> or the seats are released.</p>
+                    <button type="button" className="btn-primary w-full" onClick={() => payRest(p)}>Pay the rest · {rupees(p.balance)}</button>
+                  </>
+                )}
+                {p.status === 'HELD' && !p.canPayBalance && p.waitingReason && <p className="text-sm text-ink-soft">{p.waitingReason}.</p>}
+                {p.status === 'CONFIRMED' && <p className="text-sm text-ink-soft">Paid in full. Your entry pass is below.</p>}
+                {p.status === 'LAPSED' && <p className="text-sm text-ink-soft">The rest was not paid in time, so the seats were released. The 25% is not refunded.</p>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {usable.length === 0 ? (
         <div className="rounded-2xl border-[1.5px] border-dashed border-edge p-8 text-center sm:p-12">
