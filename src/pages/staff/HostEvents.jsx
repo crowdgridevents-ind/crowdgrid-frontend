@@ -12,11 +12,27 @@ import PhoneField from '../../components/PhoneField';
 import { cleanText, firstError, intError, optionalPhoneError, pinError, textError } from '../../lib/validate';
 import PageTitle from '../../components/PageTitle';
 import { ROLE_LABELS, useAuth } from '../../lib/auth';
+import { PAY_WINDOW_HOURS, PREBOOK_MAX } from '../../lib/prebook';
 
 // Description length is counted without spaces (same rule as the server)
 const DESC_MIN = 150;
 const DESC_MAX = 200;
 const letters = (t) => t.replace(/\s/g, '').length;
+
+/** "Booking opens" date for pre-booking: same rules as the server (prebook.service.js validateOpening). */
+const opensAt = (opens) => `${opens.date}T${opens.time}:00+05:30`;
+const opensError = (opens, when, price) => {
+  if (!opens.on) return '';
+  if (!(Number(price) > 0)) return 'Pre-booking is only for paid events';
+  if (!opens.date || !opens.time) return 'Choose when booking opens';
+  const at = new Date(opensAt(opens)).getTime();
+  if (Number.isNaN(at)) return 'Choose a valid date and time for booking to open';
+  if (at <= Date.now()) return 'Booking must open in the future';
+  if (at + PAY_WINDOW_HOURS * 3600e3 > new Date(toIsoRange(when).startDate).getTime()) {
+    return `Booking must open at least ${PAY_WINDOW_HOURS} hours before the event starts, so pre-bookers have time to pay the rest`;
+  }
+  return '';
+};
 
 function HostForm({ onCreated, onCancel }) {
   const [form, setForm] = useState({
@@ -35,6 +51,9 @@ function HostForm({ onCreated, onCancel }) {
   });
   const [tried, setTried] = useState(false);
   const [when, setWhen] = useState({ date: addDaysIST(todayIST(), 3), start: '18:00', end: '20:00' });
+  // Optional pre-booking: until this date only pre-bookings (25% now) are taken
+  const [opens, setOpens] = useState({ on: false, date: addDaysIST(todayIST(), 1), time: '10:00' });
+  const openErr = opensError(opens, when, form.ticketPrice);
   const [location, setLocation] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -69,6 +88,7 @@ function HostForm({ onCreated, onCancel }) {
       intError(form.capacity, 'Capacity', { min: 1, max: 100000, required: true }),
       intError(form.minAge, 'Minimum age', { min: 0, max: 100 }),
       optionalPhoneError(form.contactCountryCode, form.contactPhone) && `Contact number: ${optionalPhoneError(form.contactCountryCode, form.contactPhone)}`,
+      openErr,
     );
     if (problem) {
       setError(`Please fix the highlighted fields. ${problem}`);
@@ -96,6 +116,7 @@ function HostForm({ onCreated, onCancel }) {
         body.contactPhone = form.contactPhone;
       }
       if (location) body.location = location;
+      if (opens.on) body.bookingOpensAt = opensAt(opens);
       const { data } = await API.post('/events', body);
       onCreated(data);
     } catch (err) {
@@ -164,6 +185,30 @@ function HostForm({ onCreated, onCancel }) {
         <NumberField id="h-price" label="Ticket price" prefix="₹" min={0} max={100000} required value={form.ticketPrice} onChange={put('ticketPrice')} showErrors={tried} hint={form.ticketPrice === '0' ? 'Free entry' : '0 = free, up to ₹1,00,000'} />
         <NumberField id="h-cap" label="Capacity (people)" min={1} max={100000} required value={form.capacity} onChange={put('capacity')} showErrors={tried} />
         <NumberField id="h-age" label="Minimum age" min={0} max={100} value={form.minAge} onChange={put('minAge')} showErrors={tried} hint="Leave empty for all ages" />
+        <div className="space-y-3 rounded-xl border border-line p-4 sm:col-span-3" data-testid="prebook-setting">
+          <label className="flex min-h-11 items-center gap-3 font-semibold">
+            <input type="checkbox" className="size-5" checked={opens.on} disabled={!(Number(form.ticketPrice) > 0)} onChange={(e) => setOpens((o) => ({ ...o, on: e.target.checked }))} />
+            Take pre-bookings before tickets go on sale
+          </label>
+          <p className="text-sm text-ink-soft">
+            {Number(form.ticketPrice) > 0
+              ? `Until the date below, visitors can only pre-book (up to ${PREBOOK_MAX} tickets each) by paying 25%. From that date tickets go on sale, and pre-bookers have ${PAY_WINDOW_HOURS} hours to pay the rest or their seats are released (the 25% is kept).`
+              : 'Pre-booking is only for paid events.'}
+          </p>
+          {opens.on && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="field-label" htmlFor="h-opens-date">Booking opens on</label>
+                <input id="h-opens-date" type="date" className="field" min={todayIST()} max={when.date} value={opens.date} onChange={(e) => setOpens((o) => ({ ...o, date: e.target.value }))} required />
+              </div>
+              <div>
+                <label className="field-label" htmlFor="h-opens-time">At (IST)</label>
+                <input id="h-opens-time" type="time" step={900} className="field" value={opens.time} onChange={(e) => setOpens((o) => ({ ...o, time: e.target.value }))} required />
+              </div>
+            </div>
+          )}
+          {opens.on && openErr && <p className="text-sm font-semibold text-kumkum" role="alert">{openErr}</p>}
+        </div>
         <PhoneField
           id="h-phone"
           className="sm:col-span-3"
@@ -246,6 +291,12 @@ function HostedEvent({ e, over }) {
           <h3 className="text-lg font-bold"><Link to={`/event/${e.slug}`} className="underline-offset-4 hover:underline">{e.title}</Link></h3>
           <p className="text-sm text-ink-soft">{categoryLabel(e.category)} · {e.venue}</p>
           <p className="text-sm">{fmtDateTime(e.startDate)}{over ? ' (over)' : ''}</p>
+          {e.prebooked && (
+            <p className="mt-1 text-sm" data-testid="host-prebook">
+              {e.bookingPhase === 'PREBOOK' ? <>Pre-booking until <b>{fmtDateTime(e.bookingOpensAt)}</b> · </> : 'Pre-booking: '}
+              {e.prebooked.held} held · {e.prebooked.confirmed} paid in full · {e.prebooked.lapsed} lapsed
+            </p>
+          )}
         </div>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-1 text-sm sm:grid-cols-4 md:text-right">
           <div><dt className="text-ink-soft">Price</dt><dd className="font-semibold tabular-nums">{e.ticketPrice ? rupees(e.ticketPrice) : 'Free'}</dd></div>

@@ -5,11 +5,12 @@ import { BadgeCheck, CalendarDays, ExternalLink, MapPin, Phone, ShieldCheck, Tic
 import API, { errorMessage } from '../lib/api';
 import { canBook, useAuth } from '../lib/auth';
 import { rupees, useCart } from '../lib/cart';
-import { categoryLabel, fmtDate, fmtTime, googleMapsUrl } from '../lib/format';
+import { categoryLabel, fmtDate, fmtDateTime, fmtTime, googleMapsUrl } from '../lib/format';
 import Notice, { Loading } from '../components/Notice';
 import { cachePass } from '../lib/passCache';
 import { addTicketToCart, placesLeft } from '../components/EventCards';
 import { MAX_PER_ACCOUNT } from '../lib/limits';
+import { PREBOOK_MAX, PAY_WINDOW_HOURS, addPrebookToCart, balanceDueAt, inPrebooking, splitPrice } from '../lib/prebook';
 import PageHero from '../components/PageHero';
 import { DEFAULT_EVENTS } from '../data/defaultEvents';
 
@@ -26,9 +27,13 @@ export default function EventDetail() {
   const [freeMsg, setFreeMsg] = useState(null);
   const [people, setPeople] = useState(1);
   const [mine, setMine] = useState(null); // { held, left } tickets this account already has
+  const [pre, setPre] = useState(null); // { held, left } tickets this account has pre-booked
+  const [preAdded, setPreAdded] = useState(false);
 
   const loadMine = (id) =>
     API.get(`/events/${id}/my-tickets`).then(({ data }) => setMine(data)).catch(() => setMine(null));
+  const loadPre = (id) =>
+    API.get(`/events/${id}/my-prebooked`).then(({ data }) => setPre(data)).catch(() => setPre(null));
 
   useEffect(() => {
     API.get(`/events/${slug}`)
@@ -37,6 +42,7 @@ export default function EventDetail() {
           setEvent(data);
           setError('');
           if (user && data.kind === 'PUBLIC') loadMine(data._id);
+          if (user && data.kind === 'PUBLIC' && data.bookingOpensAt) loadPre(data._id);
         }
       })
       .catch((e) => {
@@ -60,6 +66,18 @@ export default function EventDetail() {
   const bbox = loc ? `${loc.lng - 0.006},${loc.lat - 0.004},${loc.lng + 0.006},${loc.lat + 0.004}` : null;
 
   const free = !(event.ticketPrice > 0);
+  // Before the booking opening date, only pre-booking (25% now) is possible
+  const preOpen = !free && inPrebooking(event);
+  const preLeft = Math.min(placesOpen, pre ? pre.left : PREBOOK_MAX);
+  const preInCart = (cart.items || []).find((i) => i.key === `PREBOOK:${event._id}`)?.input?.people || 0;
+  const preCount = Math.min(people, Math.max(preLeft, 1));
+  const preSplit = splitPrice(event.ticketPrice, preCount);
+  const prebookNow = () => {
+    if (!user) return navigate('/login', { state: { from: `/event/${slug}` } });
+    addPrebookToCart(cart, event, Math.min(people, preLeft));
+    setPreAdded(true);
+  };
+
   const register = async () => {
     if (!user) return navigate('/login', { state: { from: `/event/${slug}` } });
     if (free) {
@@ -185,7 +203,48 @@ export default function EventDetail() {
                 )}
               </p>
             )}
-            {canBook(user) ? (
+            {pre?.held > 0 && (
+              <p className="rounded-xl bg-marigold-wash/60 p-3 text-sm" data-testid="my-prebooked">
+                You have pre-booked <b>{pre.held}</b> {pre.held === 1 ? 'ticket' : 'tickets'} for this event.{' '}
+                {preOpen
+                  ? `Pay the rest in your passbook when booking opens on ${fmtDateTime(event.bookingOpensAt)}.`
+                  : <>Pay the rest by <b>{fmtDateTime(balanceDueAt(event))}</b> in <Link to="/passbook" className="font-bold underline">your passbook</Link> to get your entry pass.</>}
+              </p>
+            )}
+            {preOpen ? (
+              <section className="space-y-4" aria-label="Pre-booking" data-testid="prebook-box">
+                <div className="rounded-xl border border-marigold/40 bg-marigold-wash/60 p-4 text-sm">
+                  <p className="font-bold text-base">Pre-booking is open</p>
+                  <p className="mt-1">Tickets go on sale on <b>{fmtDateTime(event.bookingOpensAt)}</b>. Pre-book now by paying <b>25%</b>; your seats are held.</p>
+                  <p className="mt-1 text-ink-soft">Pay the remaining 75% within {PAY_WINDOW_HOURS} hours of booking opening to get your entry pass. If it is not paid in time, the seats are released and the 25% is not refunded.</p>
+                </div>
+                {preAdded && (
+                  <Notice tone="success">
+                    Pre-booking added. <Link to="/checkout" className="font-bold underline">Go to checkout</Link>
+                  </Notice>
+                )}
+                {preInCart > 0 && !preAdded && (
+                  <p className="rounded-xl bg-tulsi-wash p-3 text-sm"><b>{preInCart}</b> pre-booked {preInCart === 1 ? 'ticket is' : 'tickets are'} in your cart. Change the number below and add again to update it.</p>
+                )}
+                {canBook(user) ? (
+                  <>
+                    {!over && preLeft > 0 && (
+                      <PeopleStepper id="ev-prebook" label="Tickets to pre-book" value={preCount} max={preLeft} onChange={setPeople} hint={`Up to ${PREBOOK_MAX} pre-booked tickets per account.`} />
+                    )}
+                    <button type="button" className="btn-primary w-full text-lg" disabled={over || preLeft === 0} onClick={prebookNow}>
+                      <Ticket size={20} aria-hidden /> Pre-book · {rupees(preSplit.deposit)} now
+                    </button>
+                    <p className="text-sm text-ink-soft">
+                      {preLeft === 0 && pre?.left === 0
+                        ? `You have pre-booked the most one account can (${PREBOOK_MAX}).`
+                        : `${rupees(preSplit.total)} in total: ${rupees(preSplit.deposit)} now, ${rupees(preSplit.balance)} when booking opens.`}
+                    </p>
+                  </>
+                ) : (
+                  <p className="rounded-xl bg-mist p-3 text-sm text-ink-soft">You are signed in as staff. Pre-booking is for pilgrims and visitors.</p>
+                )}
+              </section>
+            ) : canBook(user) ? (
               <>
                 {!over && left > 0 && (
                   <PeopleStepper id="ev-people" label="Tickets" value={Math.min(people, left)} max={left} onChange={setPeople} hint={`Up to ${MAX_PER_ACCOUNT} tickets per account. You can book them together or in more than one go.`} />
@@ -197,7 +256,7 @@ export default function EventDetail() {
             ) : (
               <p className="rounded-xl bg-mist p-3 text-sm text-ink-soft">You are signed in as staff. Registration is for pilgrims and visitors.</p>
             )}
-            <p className="text-sm text-ink-soft">{free ? 'Confirmed instantly, no payment needed.' : 'Pay by UPI or card at checkout.'} Your entry pass QR appears in your passbook.</p>
+            {!preOpen && <p className="text-sm text-ink-soft">{free ? 'Confirmed instantly, no payment needed.' : 'Pay by UPI or card at checkout.'} Your entry pass QR appears in your passbook.</p>}
           </div>
         </aside>
       </div>

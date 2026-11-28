@@ -161,6 +161,7 @@ function PayStep({ order, onPaid, onBack }) {
 
 function Receipt({ order }) {
   const failed = order.items.filter((i) => i.status === 'FAILED');
+  const prebooked = order.items.filter((i) => i.kind === 'PREBOOK' && i.status === 'ISSUED');
   return (
     <div className="space-y-5">
       <div className="panel space-y-2 p-6">
@@ -178,6 +179,11 @@ function Receipt({ order }) {
         {failed.length > 0 && (
           <Notice tone="error">
             {failed.map((i) => `${i.label}: ${i.error}`).join(' · ')}. {rupees(order.refunded)} has been refunded to the same account.
+          </Notice>
+        )}
+        {prebooked.length > 0 && (
+          <Notice tone="success">
+            Pre-booked: {prebooked.map((i) => i.label.replace(/ \(pre-booking\)$/, '')).join(', ')}. Your seats are held. When booking opens, pay the rest from your passbook within 48 hours to get your entry pass.
           </Notice>
         )}
       </div>
@@ -228,9 +234,10 @@ export default function Checkout() {
     data.passes.forEach(cachePass);
     cart.clear();
     setPaid(data);
+    const onlyPrebooked = data.passes.length === 0 && data.items.some((i) => i.kind === 'PREBOOK' && i.status === 'ISSUED');
     celebrate({
       title: data.total > 0 ? 'Payment successful' : 'Booking confirmed',
-      line: 'Your passes are in your passbook.',
+      line: onlyPrebooked ? 'Your seats are held. Pay the rest when booking opens.' : 'Your passes are in your passbook.',
     });
   };
 
